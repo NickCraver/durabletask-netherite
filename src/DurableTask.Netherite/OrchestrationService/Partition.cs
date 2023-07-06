@@ -96,6 +96,7 @@ namespace DurableTask.Netherite
 
             this.TraceHelper.TracePartitionProgress("Starting", ref this.LastTransition, this.CurrentTimeMs, "");
 
+            // Register code that runs when the partition is terminated, to trace partition progress
             errorHandler.Token.Register(() =>
             {
                 this.TraceHelper.TracePartitionProgress("Terminated", ref this.LastTransition, this.CurrentTimeMs, "");
@@ -108,6 +109,35 @@ namespace DurableTask.Netherite
                 }
 
             }, useSynchronizationContext: false);
+
+            // Register code that runs when the partition is disposed, to trace partition progress
+            var disposeTask = errorHandler.WaitForDisposeTasksAsync.ContinueWith((Task<int> disposeTasks) =>
+            {
+                string details;
+
+                if (!disposeTasks.IsFaulted)
+                {
+                    details = $"{disposeTasks.Result} completed";
+                }
+                else
+                {
+                    if (disposeTasks.Exception is AggregateException aggregate)
+                    {
+                        foreach (var e in aggregate.InnerExceptions)
+                        {
+                            errorHandler.HandleError("DisposeTasks", "Exception in DisposeTask", e, false, false);
+                        }
+                        details = $"{aggregate.InnerExceptions.Count} failed";
+                    }
+                    else
+                    {
+                        errorHandler.HandleError("DisposeTasks", "Exception in Dispose", disposeTasks.Exception, false, false);
+                        details = disposeTasks.Exception.Message;
+                    }
+                }
+
+                this.TraceHelper.TracePartitionProgress("Disposed", ref this.LastTransition, this.CurrentTimeMs, details);
+            });
           
             await MaxConcurrentStarts.WaitAsync();
 

@@ -122,7 +122,7 @@ namespace DurableTask.Netherite.Faster
             if (this.partition.Settings.TestHooks?.ReplayChecker == null) 
             {
                 this.hangCheckTimer = new Timer(this.CheckForStuckWorkers, null, 0, 20000);
-                errorHandler.OnShutdown += () => this.hangCheckTimer.Dispose();
+                errorHandler.AddDisposeTask(() => this.hangCheckTimer.Dispose());
             }
 
             bool hasCheckpoint = false;

@@ -112,7 +112,7 @@ namespace DurableTask.Netherite.Faster
             partition.Assert(this.fht.ReadCache == null, "Unexpected read cache");
 
             this.terminationToken = partition.ErrorHandler.Token;
-            partition.ErrorHandler.OnShutdown += this.Shutdown;
+            partition.ErrorHandler.AddDisposeTask(this.Dispose);
 
             this.compactionStopwatch = new Stopwatch();
             this.compactionStopwatch.Start();
@@ -122,57 +122,94 @@ namespace DurableTask.Netherite.Faster
             this.blobManager.TraceHelper.FasterProgress("Constructed FasterKV");
         }
 
-        void Shutdown()
+        void Dispose()
         {
-            try
+            // we are individually wrapping all dispose calls to catch exceptions, 
+            // and to support timeouts
+
+            if (this.cacheTracker != null)
             {
-                this.TraceHelper.FasterProgress("Disposing CacheTracker");
-                this.cacheTracker?.Dispose();
+                this.ExecuteDisposeAction(
+                    "Disposing CacheTracker",
+                    TimeSpan.FromSeconds(30),
+                    this.cacheTracker.Dispose
+                );
+            }
 
-                foreach (var s in this.sessionsToDisposeOnShutdown)
-                {
-                    this.TraceHelper.FasterStorageProgress($"Disposing Temporary Session");
-                    s.Dispose();
-                }
+            foreach (var s in this.sessionsToDisposeOnShutdown)
+            {
+                this.ExecuteDisposeAction(
+                    "Disposing Temporary Session",
+                    TimeSpan.FromSeconds(30),
+                    s.Dispose
+                );
+            }
 
-                this.TraceHelper.FasterProgress("Disposing Main Session");
+            if (this.mainSession != null)
+            {
+                this.ExecuteDisposeAction(
+                    "Disposing Main Session",
+                    TimeSpan.FromSeconds(30),
+                    this.mainSession.Dispose
+                );
+            }
+
+            foreach (var session in this.querySessions.Where(s => s != null))
+            {
+                this.ExecuteDisposeAction(
+                   $"Disposing Query Session {session.Name}",
+                   TimeSpan.FromSeconds(30),
+                   session.Dispose
+                );
+            }
+
+            this.ExecuteDisposeAction(
+               "Disposing FasterKV",
+               TimeSpan.FromSeconds(30),
+               this.fht.Dispose
+            );
+
+            this.ExecuteDisposeAction(
+               "Disposing BlobManager Devices",
+               TimeSpan.FromSeconds(30),
+                this.blobManager.DisposeDevices
+            );
+
+            if (this.blobManager.FaultInjector != null)
+            {
+                this.ExecuteDisposeAction(
+                    "Unregistering from FaultInjector",
+                    TimeSpan.FromSeconds(30),
+                    () => this.blobManager.FaultInjector.Disposed(this.blobManager)
+                );
+            }
+
+            this.TraceHelper.FasterProgress("Disposed FasterKV");
+        }
+
+        void ExecuteDisposeAction(string description, TimeSpan maxTime, Action a)
+        {
+            this.TraceHelper.FasterProgress(description);
+            var completedInTime = Task.Run(() =>
+            {
                 try
                 {
-                    this.mainSession?.Dispose();
+                    a();
                 }
-                catch(OperationCanceledException)
+                catch (OperationCanceledException)
                 {
                     // can happen during shutdown
                 }
-
-                this.TraceHelper.FasterProgress("Disposing Query Sessions");
-                foreach (var s in this.querySessions)
+                catch (Exception e)
                 {
-                    try
-                    {
-                        s?.Dispose();
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // can happen during shutdown
-                    }
+                    this.TraceHelper.FasterStorageError($"{description} failed", e);
                 }
+            }).Wait(maxTime);
 
-                this.TraceHelper.FasterProgress("Disposing FasterKV");
-                this.fht.Dispose();
-
-                this.TraceHelper.FasterProgress($"Disposing Devices");
-                this.blobManager.DisposeDevices();
-
-                if (this.blobManager.FaultInjector != null)
-                {
-                    this.TraceHelper.FasterProgress($"Unregistering from FaultInjector");
-                    this.blobManager.FaultInjector.Disposed(this.blobManager);
-                }
-            }
-            catch (Exception e)
+            if (!completedInTime)
             {
-                this.blobManager.TraceHelper.FasterStorageError("Disposing FasterKV", e);
+                string message = $"{description}: failed to complete after {maxTime}";
+                this.TraceHelper.FasterStorageError(message, new TimeoutException(message));
             }
         }
 
